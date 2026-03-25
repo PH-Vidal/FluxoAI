@@ -137,3 +137,24 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Variáveis de ambiente (NUNCA subir para o GitHub)
+.env
+
+# Dependências
+node_modules/
+
+# Sessão do WhatsApp (gerada automaticamente)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Dados gerados em runtime
+data/agendamentos.json
+
+# Configs reais dos clientes (apenas o .example vai pro GitHub)
+configs/*.json
+!configs/*.example.json
+
+# Sistema
+.DS_Store
+Thumbs.db
