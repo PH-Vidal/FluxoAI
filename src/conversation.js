@@ -15,8 +15,57 @@ import {
 
 import { perguntarIA } from './groq.js';
 
+// FIX: sessões com TTL para evitar memory leak
+// Sem TTL, cada número que mandar mensagem vive em memória para sempre
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutos de inatividade
+
 // Armazena o estado de cada conversa em memória
 const sessoes = {};
+
+// FIX: limpa sessões inativas a cada 10 minutos
+setInterval(() => {
+    const agora = Date.now();
+    for (const telefone of Object.keys(sessoes)) {
+        if (agora - sessoes[telefone].ultimaAtividade > SESSION_TTL_MS) {
+            delete sessoes[telefone];
+        }
+    }
+}, 10 * 60 * 1000);
+
+/**
+ * Retorna ou cria a sessão do usuário, atualizando o timestamp de atividade
+ * @param {string} telefone
+ * @returns {Object}
+ */
+function obterSessao(telefone) {
+    if (!sessoes[telefone]) {
+        sessoes[telefone] = {
+            etapa: 'menu',
+            agendamento: {},
+            // FIX: histórico agora é populado e enviado à IA para contexto de conversa
+            historico: [],
+            ultimaAtividade: Date.now()
+        };
+    }
+    sessoes[telefone].ultimaAtividade = Date.now();
+    return sessoes[telefone];
+}
+
+/**
+ * Adiciona uma interação ao histórico da sessão para contexto da IA
+ * Mantém no máximo 20 mensagens (10 pares user/assistant)
+ * @param {Object} sessao
+ * @param {string} mensagemUsuario
+ * @param {string} respostaAssistente
+ */
+function registrarNoHistorico(sessao, mensagemUsuario, respostaAssistente) {
+    sessao.historico.push({ role: 'user', content: mensagemUsuario });
+    sessao.historico.push({ role: 'assistant', content: respostaAssistente });
+    // Mantém apenas as últimas 20 entradas (10 pares) para não explodir tokens
+    if (sessao.historico.length > 20) {
+        sessao.historico.splice(0, sessao.historico.length - 20);
+    }
+}
 
 /**
  * Processa a mensagem recebida e retorna a resposta adequada
@@ -26,11 +75,7 @@ const sessoes = {};
  * @returns {Promise<string>}
  */
 export async function processarMensagem(telefone, mensagem, config) {
-    if (!sessoes[telefone]) {
-        sessoes[telefone] = { etapa: 'menu', agendamento: {}, historico: [] };
-    }
-
-    const sessao = sessoes[telefone];
+    const sessao = obterSessao(telefone);
     const texto = mensagem.trim();
 
     // Fora do horário comercial
@@ -71,9 +116,14 @@ export async function processarMensagem(telefone, mensagem, config) {
                 return formatarBoasVindas(config);
             }
 
-            // Fallback para IA
-            const respostaIA = await perguntarIA(texto, config);
-            return respostaIA + `\n\nDigite *0* para ver o menu principal.`;
+            // FIX: passa histórico da sessão para a IA ter contexto das mensagens anteriores
+            const respostaIA = await perguntarIA(texto, config, sessao.historico);
+            const respostaFinal = respostaIA + `\n\nDigite *0* para ver o menu principal.`;
+
+            // FIX: registra interação no histórico para próximas chamadas à IA
+            registrarNoHistorico(sessao, texto, respostaIA);
+
+            return respostaFinal;
         }
 
         case 'escolher_servico': {
@@ -149,7 +199,7 @@ export async function processarMensagem(telefone, mensagem, config) {
             if (texto.toLowerCase() === 'sim') {
                 const a = sessao.agendamento;
                 const id = gerarId();
-                salvarAgendamento({
+                await salvarAgendamento({
                     id, telefone,
                     nome: a.nome,
                     servico: a.servico,
@@ -179,7 +229,7 @@ export async function processarMensagem(telefone, mensagem, config) {
                 sessao.etapa = 'menu';
                 return formatarBoasVindas(config);
             }
-            const cancelado = cancelarAgendamento(telefone, texto.toUpperCase());
+            const cancelado = await cancelarAgendamento(telefone, texto.toUpperCase());
             sessao.etapa = 'menu';
             if (cancelado) {
                 return `✅ Agendamento *${texto.toUpperCase()}* cancelado!\n\n${formatarBoasVindas(config)}`;

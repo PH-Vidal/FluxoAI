@@ -10,7 +10,12 @@ import { processarMensagem } from './conversation.js';
 export function iniciarBot(config) {
     const client = new Client({
         authStrategy: new LocalAuth(),
-        puppeteer: { args: ['--no-sandbox'] }
+        puppeteer: {
+            // FIX: --no-sandbox desativa a sandbox do Chromium, expondo o sistema a conteúdo malicioso.
+            // --disable-setuid-sandbox é complementar e necessário em ambientes sem root-namespace.
+            // NUNCA rode com --no-sandbox como root em produção. Use usuário sem privilégios.
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        }
     });
 
     client.on('qr', qr => {
