@@ -1,10 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 
+// TODO [SQLite]: substituir ARQUIVO_AGENDAMENTOS + fs.readFileSync/writeFileSync por
+// conexão com better-sqlite3. Todas as funções abaixo têm anotações de como seria
+// a query equivalente. A fila serial (_filaPromise) pode ser removida após a migração,
+// pois o SQLite garante atomicidade nativamente via transações.
 const ARQUIVO_AGENDAMENTOS = path.resolve('./data/agendamentos.json');
 
-// FIX: fila serial para eliminar race condition em leitura → modificação → escrita
-// Sem isso, dois usuários simultâneos podem sobrescrever o agendamento um do outro
+// Fila serial para eliminar race condition em leitura → modificação → escrita.
+// Sem isso, dois usuários simultâneos podem sobrescrever o agendamento um do outro.
 let _filaPromise = Promise.resolve();
 
 function serializar(fn) {
@@ -13,7 +17,8 @@ function serializar(fn) {
 }
 
 /**
- * Carrega todos os agendamentos do arquivo JSON (uso interno)
+ * Carrega todos os agendamentos do arquivo JSON (uso interno).
+ * TODO [SQLite]: substituir por `db.prepare('SELECT * FROM agendamentos').all()`
  * @returns {Array}
  */
 function _carregarAgendamentos() {
@@ -28,7 +33,8 @@ function _carregarAgendamentos() {
 }
 
 /**
- * Carrega todos os agendamentos (leitura pública — não usa lock, apenas leitura)
+ * Carrega todos os agendamentos (leitura pública — não usa lock, apenas leitura).
+ * TODO [SQLite]: `db.prepare('SELECT * FROM agendamentos').all()`
  * @returns {Array}
  */
 export function carregarAgendamentos() {
@@ -36,7 +42,8 @@ export function carregarAgendamentos() {
 }
 
 /**
- * Salva um novo agendamento no arquivo JSON de forma serializada (sem race condition)
+ * Salva um novo agendamento no arquivo JSON de forma serializada (sem race condition).
+ * TODO [SQLite]: `db.prepare('INSERT INTO agendamentos VALUES (...)').run(agendamento)`
  * @param {Object} agendamento
  * @returns {Promise<void>}
  */
@@ -49,8 +56,10 @@ export function salvarAgendamento(agendamento) {
 }
 
 /**
- * Marca um agendamento como cancelado de forma serializada
- * FIX: também compacta entradas canceladas com mais de 30 dias para evitar crescimento infinito do arquivo
+ * Marca um agendamento como cancelado de forma serializada.
+ * Também compacta entradas canceladas com mais de 30 dias para evitar crescimento infinito.
+ * TODO [SQLite]: `db.prepare("UPDATE agendamentos SET status='cancelado', canceladoEm=? WHERE id=? AND telefone=?").run(...)`
+ *               A compactação vira: `db.prepare("DELETE FROM agendamentos WHERE status='cancelado' AND canceladoEm < ?").run(limite)`
  * @param {string} telefone
  * @param {string} id
  * @returns {Promise<boolean>}
@@ -64,7 +73,7 @@ export function cancelarAgendamento(telefone, id) {
         agendamentos[index].status = 'cancelado';
         agendamentos[index].canceladoEm = new Date().toISOString();
 
-        // FIX: compacta cancelamentos com mais de 30 dias — evita crescimento infinito do arquivo
+        // Compacta cancelamentos com mais de 30 dias — evita crescimento infinito do arquivo
         const trintaDiasAtras = new Date();
         trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
 
@@ -80,7 +89,29 @@ export function cancelarAgendamento(telefone, id) {
 }
 
 /**
- * Retorna os horários já ocupados para uma data específica
+ * Marca um field de lembrete como enviado de forma serializada.
+ * TODO [SQLite]: `db.prepare("UPDATE agendamentos SET lembrete24h=1 WHERE id=?").run(id)` (ou lembrete1h)
+ * @param {string} id
+ * @param {'24h'|'1h'} tipo
+ * @returns {Promise<void>}
+ */
+export function marcarLembreteEnviado(id, tipo) {
+    return serializar(() => {
+        const agendamentos = _carregarAgendamentos();
+        const idx = agendamentos.findIndex(a => a.id === id);
+        if (idx === -1) return;
+
+        const campo = tipo === '24h' ? 'lembrete24h' : 'lembrete1h';
+        agendamentos[idx][campo] = true;
+        agendamentos[idx][`${campo}Em`] = new Date().toISOString();
+
+        fs.writeFileSync(ARQUIVO_AGENDAMENTOS, JSON.stringify(agendamentos, null, 2));
+    });
+}
+
+/**
+ * Retorna os horários já ocupados para uma data específica.
+ * TODO [SQLite]: `db.prepare("SELECT horario FROM agendamentos WHERE data=? AND status!='cancelado'").all(data).map(r => r.horario)`
  * @param {string} data - formato DD/MM/AAAA
  * @returns {string[]}
  */
@@ -92,17 +123,54 @@ export function getHorariosOcupados(data) {
 
 /**
  * Retorna os horários disponíveis para uma data, excluindo os ocupados
+ * e filtrando horários que já passaram caso a data seja hoje (filtro intradiário).
+ * TODO [SQLite]: a query de horarios ocupados muda conforme anotado em getHorariosOcupados;
+ *               o filtro intradiário permanece em JavaScript após a query.
  * @param {string} data - formato DD/MM/AAAA
  * @param {Object} config - Configuração do negócio
  * @returns {string[]}
  */
 export function getHorariosDisponiveis(data, config) {
     const ocupados = getHorariosOcupados(data);
-    return config.horariosDisponiveis.filter(h => !ocupados.includes(h));
+    let disponiveis = config.horariosDisponiveis.filter(h => !ocupados.includes(h));
+
+    // ── Filtro intradiário: remove horários que já passaram quando a data é hoje ──
+    const { timezone = 'America/Sao_Paulo' } = config.horarioComercial;
+    const agora = new Date();
+
+    // Monta partes de data/hora no fuso do negócio
+    const partes = Object.fromEntries(
+        new Intl.DateTimeFormat('pt-BR', {
+            timeZone: timezone,
+            day:    '2-digit',
+            month:  '2-digit',
+            year:   'numeric',
+            hour:   '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        })
+        .formatToParts(agora)
+        .map(({ type, value }) => [type, value])
+    );
+
+    const dataHoje = `${partes.day}/${partes.month}/${partes.year}`;
+
+    if (data === dataHoje) {
+        const horaAtual   = parseInt(partes.hour,   10);
+        const minutoAtual = parseInt(partes.minute, 10);
+
+        disponiveis = disponiveis.filter(h => {
+            const [hh, mm] = h.split(':').map(Number);
+            return hh > horaAtual || (hh === horaAtual && mm > minutoAtual);
+        });
+    }
+
+    return disponiveis;
 }
 
 /**
- * Retorna os agendamentos ativos de um telefone
+ * Retorna os agendamentos ativos de um telefone.
+ * TODO [SQLite]: `db.prepare("SELECT * FROM agendamentos WHERE telefone=? AND status!='cancelado'").all(telefone)`
  * @param {string} telefone
  * @returns {Array}
  */
