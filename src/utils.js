@@ -1,16 +1,16 @@
 import { randomBytes } from 'crypto';
 
 /**
- * Gera um ID único de 64 bits (colisão praticamente impossível)
- * FIX: era randomBytes(4) — 32 bits com ~0.01% colisão em 1k agendamentos
+ * Gera um ID único de 64 bits (colisão praticamente impossível).
+ * FIX: era randomBytes(4) — 32 bits com ~0.01% colisão em 1k agendamentos.
  */
 export function gerarId() {
     return randomBytes(8).toString('hex').toUpperCase();
 }
 
 /**
- * Verifica se o momento atual está dentro do horário comercial
- * FIX: usa timezone do config para evitar erro UTC vs local (ex: servidor em UTC, negócio em UTC-3)
+ * Verifica se o momento atual está dentro do horário comercial.
+ * FIX: usa timezone do config para evitar erro UTC vs local (ex: servidor em UTC, negócio em UTC-3).
  * @param {Object} config
  */
 export function eHorarioComercial(config) {
@@ -38,7 +38,21 @@ export function eHorarioComercial(config) {
 }
 
 /**
- * Formata a mensagem de boas-vindas com os dados do config
+ * Formata a mensagem de boas-vindas com os dados do config.
+ *
+ * Suporte a menu configurável via JSON:
+ * Se `config.menuOpcoes` existir, usa seus itens como opções do menu.
+ * Cada item deve ter { num: string, label: string }.
+ * Se ausente, usa o menu padrão com as 4 opções nativas do FluxoAI.
+ *
+ * Exemplo em negocio.json:
+ * "menuOpcoes": [
+ *   { "num": "1️⃣", "label": "Fazer um agendamento" },
+ *   { "num": "2️⃣", "label": "Ver meus agendamentos" },
+ *   { "num": "3️⃣", "label": "Cancelar agendamento" },
+ *   { "num": "4️⃣", "label": "Ver serviços e preços" }
+ * ]
+ *
  * @param {Object} config
  */
 export function formatarBoasVindas(config) {
@@ -47,18 +61,22 @@ export function formatarBoasVindas(config) {
         .replace('{nome}', nome)
         .replace('{emoji}', emoji);
 
-    return (
-        base +
-        `\n\n1️⃣ Fazer um agendamento` +
-        `\n2️⃣ Ver meus agendamentos` +
-        `\n3️⃣ Cancelar agendamento` +
-        `\n4️⃣ Ver serviços e preços` +
-        `\n\nDigite o número da opção desejada.`
-    );
+    const opcoes = Array.isArray(config.menuOpcoes) && config.menuOpcoes.length > 0
+        ? config.menuOpcoes
+        : [
+            { num: '1️⃣', label: 'Fazer um agendamento' },
+            { num: '2️⃣', label: 'Ver meus agendamentos' },
+            { num: '3️⃣', label: 'Cancelar agendamento' },
+            { num: '4️⃣', label: 'Ver serviços e preços' },
+        ];
+
+    const menuStr = opcoes.map(o => `${o.num} ${o.label}`).join('\n');
+
+    return base + `\n\n${menuStr}\n\nDigite o número da opção desejada.`;
 }
 
 /**
- * Formata a lista de serviços disponíveis
+ * Formata a lista de serviços disponíveis.
  * @param {Object} config
  */
 export function formatarServicos(config) {
@@ -70,8 +88,8 @@ export function formatarServicos(config) {
 }
 
 /**
- * Valida e extrai os componentes de uma data no formato DD/MM/AAAA
- * FIX: compara apenas a data sem hora — evitava rejeitar datas de hoje dependendo do horário
+ * Valida e extrai os componentes de uma data no formato DD/MM/AAAA.
+ * FIX: compara apenas a data sem hora — evitava rejeitar datas de hoje dependendo do horário.
  * @param {string} texto
  * @returns {{ valido: boolean, data?: Date }}
  */
@@ -94,8 +112,8 @@ export function validarData(texto) {
 }
 
 /**
- * Valida o schema mínimo do config do negócio
- * FIX: sem validação, campos ausentes causavam crash em runtime com erro genérico
+ * Valida o schema mínimo do config do negócio.
+ * FIX: sem validação, campos ausentes causavam crash em runtime com erro genérico.
  * @param {Object} config
  * @throws {Error} se algum campo obrigatório estiver ausente
  */
