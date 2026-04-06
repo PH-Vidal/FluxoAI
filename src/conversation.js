@@ -14,26 +14,32 @@ import {
 } from './scheduler.js';
 
 import { perguntarIA } from './groq.js';
+import { logger } from './logger.js';
 
-// FIX: sessões com TTL para evitar memory leak
-// Sem TTL, cada número que mandar mensagem vive em memória para sempre
+// Sessões com TTL para evitar memory leak.
+// Sem TTL, cada número que mandar mensagem vive em memória para sempre.
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutos de inatividade
 
 // Armazena o estado de cada conversa em memória
 const sessoes = {};
 
-// FIX: limpa sessões inativas a cada 10 minutos
+// Limpa sessões inativas a cada 10 minutos
 setInterval(() => {
     const agora = Date.now();
+    let removidas = 0;
     for (const telefone of Object.keys(sessoes)) {
         if (agora - sessoes[telefone].ultimaAtividade > SESSION_TTL_MS) {
             delete sessoes[telefone];
+            removidas++;
         }
+    }
+    if (removidas > 0) {
+        logger.debug('session', `${removidas} sessão(ões) inativa(s) removida(s). Ativas: ${Object.keys(sessoes).length}`);
     }
 }, 10 * 60 * 1000);
 
 /**
- * Retorna ou cria a sessão do usuário, atualizando o timestamp de atividade
+ * Retorna ou cria a sessão do usuário, atualizando o timestamp de atividade.
  * @param {string} telefone
  * @returns {Object}
  */
@@ -42,18 +48,18 @@ function obterSessao(telefone) {
         sessoes[telefone] = {
             etapa: 'menu',
             agendamento: {},
-            // FIX: histórico agora é populado e enviado à IA para contexto de conversa
             historico: [],
             ultimaAtividade: Date.now()
         };
+        logger.debug('session', `Nova sessão criada para ${telefone}`);
     }
     sessoes[telefone].ultimaAtividade = Date.now();
     return sessoes[telefone];
 }
 
 /**
- * Adiciona uma interação ao histórico da sessão para contexto da IA
- * Mantém no máximo 20 mensagens (10 pares user/assistant)
+ * Adiciona uma interação ao histórico da sessão para contexto da IA.
+ * Mantém no máximo 20 mensagens (10 pares user/assistant).
  * @param {Object} sessao
  * @param {string} mensagemUsuario
  * @param {string} respostaAssistente
@@ -61,14 +67,13 @@ function obterSessao(telefone) {
 function registrarNoHistorico(sessao, mensagemUsuario, respostaAssistente) {
     sessao.historico.push({ role: 'user', content: mensagemUsuario });
     sessao.historico.push({ role: 'assistant', content: respostaAssistente });
-    // Mantém apenas as últimas 20 entradas (10 pares) para não explodir tokens
     if (sessao.historico.length > 20) {
         sessao.historico.splice(0, sessao.historico.length - 20);
     }
 }
 
 /**
- * Processa a mensagem recebida e retorna a resposta adequada
+ * Processa a mensagem recebida e retorna a resposta adequada.
  * @param {string} telefone
  * @param {string} mensagem
  * @param {Object} config - Configuração do negócio
@@ -78,7 +83,9 @@ export async function processarMensagem(telefone, mensagem, config) {
     const sessao = obterSessao(telefone);
     const texto = mensagem.trim();
 
-    // Fora do horário comercial
+    logger.debug('conversation', `[${telefone}] etapa="${sessao.etapa}" mensagem="${texto.slice(0, 60)}"`);
+
+    // Fora do horário comercial — bloqueia apenas o início do fluxo (etapa: menu)
     if (!eHorarioComercial(config) && sessao.etapa === 'menu') {
         return config.mensagens.foraDoPeriodo;
     }
@@ -116,11 +123,11 @@ export async function processarMensagem(telefone, mensagem, config) {
                 return formatarBoasVindas(config);
             }
 
-            // FIX: passa histórico da sessão para a IA ter contexto das mensagens anteriores
-            const respostaIA = await perguntarIA(texto, config, sessao.historico);
+            // Passa histórico + agendamentos ativos para a IA ter contexto completo do cliente
+            const agendamentosAtivos = getAgendamentosAtivos(telefone);
+            const respostaIA = await perguntarIA(texto, config, sessao.historico, agendamentosAtivos);
             const respostaFinal = respostaIA + `\n\nDigite *0* para ver o menu principal.`;
 
-            // FIX: registra interação no histórico para próximas chamadas à IA
             registrarNoHistorico(sessao, texto, respostaIA);
 
             return respostaFinal;
@@ -176,12 +183,15 @@ export async function processarMensagem(telefone, mensagem, config) {
             }
             sessao.agendamento.horario = horariosLivres[idx];
             sessao.etapa = 'confirmar_nome';
-            return `Qual é o seu *nome completo*? 😊`;
+            return `Qual é o seu *nome completo*? 😊\n\n_(Informe nome e sobrenome)_`;
         }
 
         case 'confirmar_nome': {
-            if (texto.length < 3) return `Por favor, informe seu nome completo.`;
-            sessao.agendamento.nome = texto;
+            const palavras = texto.trim().split(/\s+/);
+            if (palavras.length < 2 || texto.trim().length < 5) {
+                return `Por favor, informe seu *nome completo* (nome e sobrenome). 😊`;
+            }
+            sessao.agendamento.nome = texto.trim();
             sessao.etapa = 'confirmar_agendamento';
             const a = sessao.agendamento;
             return (
@@ -207,8 +217,11 @@ export async function processarMensagem(telefone, mensagem, config) {
                     horario: a.horario,
                     preco: a.preco,
                     status: 'confirmado',
-                    criadoEm: new Date().toISOString()
+                    criadoEm: new Date().toISOString(),
+                    lembrete24h: false,
+                    lembrete1h: false
                 });
+                logger.info('conversation', `Agendamento confirmado — ID: ${id} | ${a.servico} | ${a.data} ${a.horario} | ${telefone}`);
                 sessao.etapa = 'menu';
                 sessao.agendamento = {};
                 return (
@@ -232,6 +245,7 @@ export async function processarMensagem(telefone, mensagem, config) {
             const cancelado = await cancelarAgendamento(telefone, texto.toUpperCase());
             sessao.etapa = 'menu';
             if (cancelado) {
+                logger.info('conversation', `Agendamento cancelado — ID: ${texto.toUpperCase()} | ${telefone}`);
                 return `✅ Agendamento *${texto.toUpperCase()}* cancelado!\n\n${formatarBoasVindas(config)}`;
             }
             return `❌ Agendamento não encontrado. Verifique o ID.\n\nDigite *0* para voltar ao menu.`;
